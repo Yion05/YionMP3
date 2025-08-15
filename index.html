@@ -51,7 +51,7 @@
         <!-- Sidebar/Playlist -->
         <div class="w-1/3 bg-black bg-opacity-50 p-6 flex flex-col">
             <div id="user-profile" class="hidden items-center mb-4">
-                <img id="user-photo" class="w-10 h-10 rounded-full mr-3">
+                <img id="user-photo" class="w-10 h-10 rounded-full mr-3" alt="User profile photo">
                 <span id="user-name" class="font-semibold"></span>
                 <button id="logout-btn" class="ml-auto text-gray-400 hover:text-white"><i class="fas fa-sign-out-alt"></i></button>
             </div>
@@ -76,7 +76,7 @@
             <div class="relative z-10 flex flex-col items-center">
                 <div id="album-art-container" class="w-64 h-64 md:w-80 md:h-80 bg-gray-700 rounded-lg shadow-lg mb-6 flex items-center justify-center">
                     <i class="fas fa-music text-6xl text-gray-400"></i>
-                    <img id="album-art" src="" class="hidden w-full h-full object-cover rounded-lg">
+                    <img id="album-art" src="" class="hidden w-full h-full object-cover rounded-lg" alt="Album art">
                 </div>
                 <h1 id="song-title" class="text-3xl font-bold">No Song Selected</h1>
                 <p id="song-artist" class="text-lg text-gray-400 mb-6">Login and select a song to play</p>
@@ -114,8 +114,8 @@
         // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, signInWithCustomToken, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, addDoc, getDocs, onSnapshot, setDoc, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+        import { getFirestore, collection, doc, addDoc, onSnapshot, query, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
 
         // DOM Elements
         const audioPlayer = document.getElementById('audio-player');
@@ -142,68 +142,59 @@
         const userName = document.getElementById('user-name');
         const playlistMessage = document.getElementById('playlist-message');
 
-        // Firebase Config (This should ideally come from __firebase_config)
-        const firebaseConfig = {
-         apiKey: "AIzaSyAgqpFAzTHaw0-bUTdLJTyP_lmv1a_MDZ8",
-         authDomain: "mp3-playlist-37ecd.firebaseapp.com",
-         projectId: "mp3-playlist-37ecd",
-         storageBucket: "mp3-playlist-37ecd.firebasestorage.app",
-         messagingSenderId: "53190276396",
-         appId: "1:53190276396:web:68e4df34b0b6036399a889",
-         measurementId: "G-Z9XKR4EN2Y"
-        };
-
+        // --- App and Firebase Variables ---
         let app, auth, db, storage;
         let playlist = [];
         let currentSongIndex = -1;
-        let unsubscribePlaylist = null; // To store the onSnapshot listener
+        let unsubscribePlaylist = null; 
+        
+        // --- Get App ID and Firebase Config ---
+        // This is crucial for identifying your app instance in Firestore/Storage
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-music-app';
+        
+        // Use the provided Firebase config or an empty object
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
 
-        // Initialize Firebase if config is available
+        // --- Initialize Firebase ---
         if (Object.keys(firebaseConfig).length > 0) {
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
-            storage = getStorage(app);
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                storage = getStorage(app);
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                loginBtn.disabled = true;
+                loginBtn.textContent = "Firebase Error";
+            }
         } else {
-            console.error("Firebase config not found. Please ensure __firebase_config is provided.");
-            // Disable UI that requires Firebase
+            console.error("Firebase config not found.");
             loginBtn.disabled = true;
             loginBtn.textContent = "Firebase Unavailable";
         }
 
         // --- AUTHENTICATION ---
-        onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                // User is signed in
+        onAuthStateChanged(auth, (user) => {
+            if (user && !user.isAnonymous) {
+                // User is properly signed in
                 updateUIForLogin(user);
                 fetchPlaylist(user.uid);
             } else {
-                // User is signed out
+                // User is signed out or anonymous
                 updateUIForLogout();
             }
         });
         
-        // Handle initial auth token if provided
+        // Handle initial auth token if provided by the environment
         (async () => {
             if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                 try {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } catch (error) {
                     console.error("Error signing in with custom token:", error);
-                    // Fallback to anonymous sign-in if custom token fails
-                    if (auth) {
-                        await signInAnonymously(auth);
-                    }
-                }
-            } else {
-                // No initial token, user needs to log in manually or is already logged in via session.
-                // If auth is initialized, try anonymous sign-in to get a userId for unauthenticated operations if needed.
-                if (auth && !auth.currentUser) {
-                     await signInAnonymously(auth);
                 }
             }
         })();
-
 
         loginBtn.addEventListener('click', async () => {
             const provider = new GoogleAuthProvider();
@@ -211,7 +202,6 @@
                 await signInWithPopup(auth, provider);
             } catch (error) {
                 console.error("Error during sign-in:", error);
-                alert("Error during Google sign-in. Check console for details.");
             }
         });
 
@@ -220,7 +210,6 @@
                 await signOut(auth);
             } catch (error) {
                 console.error("Error during sign-out:", error);
-                alert("Error during sign-out. Check console for details.");
             }
         });
 
@@ -228,12 +217,13 @@
         function updateUIForLogin(user) {
             userProfile.classList.remove('hidden');
             userProfile.classList.add('flex');
-            userPhoto.src = user.photoURL || 'https://placehold.co/100x100/555/FFF?text=User'; // Placeholder if no photoURL
-            userName.textContent = user.displayName || 'Guest User';
+            userPhoto.src = user.photoURL || `https://placehold.co/40x40/777/FFF?text=${user.displayName ? user.displayName[0] : 'U'}`;
+            userName.textContent = user.displayName || 'User';
             loginBtn.classList.add('hidden');
             addSongsBtn.classList.remove('hidden');
             logoutBtn.classList.remove('hidden');
-            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = false);
+            playlistMessage.classList.add('hidden'); // Immediately hide login message
+            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = playlist.length === 0);
         }
 
         function updateUIForLogout() {
@@ -241,12 +231,14 @@
             loginBtn.classList.remove('hidden');
             addSongsBtn.classList.add('hidden');
             logoutBtn.classList.add('hidden');
-            playlistElement.innerHTML = '<div id="playlist-message" class="text-gray-400">Please log in to see your music.</div>';
+            playlistElement.innerHTML = ''; // Clear the playlist
+            playlistMessage.textContent = "Please log in to see your music.";
+            playlistMessage.classList.remove('hidden'); // Show the login message
             playlist = [];
             currentSongIndex = -1;
             resetPlayerUI();
             if (unsubscribePlaylist) {
-                unsubscribePlaylist(); // Detach the listener
+                unsubscribePlaylist(); // Detach the real-time listener
             }
         }
 
@@ -267,42 +259,30 @@
 
         // --- PLAYLIST & FIRESTORE ---
         function fetchPlaylist(userId) {
-            // Ensure Firebase is initialized before attempting Firestore operations
-            if (!db) {
-                console.warn("Firestore not initialized. Cannot fetch playlist.");
-                return;
-            }
+            if (!db) return;
             const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
-            const q = collection(db, songsCollectionPath);
+            const q = query(collection(db, songsCollectionPath));
 
-            // Detach any existing listener before attaching a new one
-            if (unsubscribePlaylist) {
-                unsubscribePlaylist();
-            }
+            if (unsubscribePlaylist) unsubscribePlaylist();
 
             unsubscribePlaylist = onSnapshot(q, (querySnapshot) => {
-                playlist = [];
+                const newPlaylist = [];
                 querySnapshot.forEach((doc) => {
-                    playlist.push({ id: doc.id, ...doc.data() });
+                    newPlaylist.push({ id: doc.id, ...doc.data() });
                 });
+                playlist = newPlaylist;
                 renderPlaylist();
-                if (playlist.length === 0) {
-                    playlistMessage.textContent = "Your playlist is empty. Upload some songs!";
-                    playlistMessage.classList.remove('hidden');
-                } else {
-                    playlistMessage.classList.add('hidden'); // Hide message if songs exist
-                }
             }, (error) => {
                 console.error("Error fetching playlist:", error);
-                alert("Error fetching playlist. Check console for details.");
             });
         }
 
         fileUpload.addEventListener('change', (event) => {
             const files = event.target.files;
             const user = auth.currentUser;
-            if (!user) {
-                alert("You must be logged in to upload songs.");
+            if (!user || user.isAnonymous) {
+                // In a real app, you'd show a more user-friendly message
+                console.error("User must be logged in to upload songs.");
                 return;
             }
             if (files.length > 0) {
@@ -314,33 +294,26 @@
 
         async function uploadSong(file, userId) {
             if (!file.type.startsWith('audio/')) {
-                console.error("Invalid file type:", file.name);
-                alert(`Cannot upload "${file.name}": Not an audio file.`);
+                console.warn(`Skipping non-audio file: ${file.name}`);
                 return;
             }
             
-            // Generate a unique ID for the song
-            const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`; // Sanitize filename for path
+            const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
             const storagePath = `artifacts/${appId}/users/${userId}/songs/${songId}`;
             const storageRef = ref(storage, storagePath);
             
-            // Show uploading status in playlist
             const uploadingItem = document.createElement('div');
             uploadingItem.className = 'playlist-item p-3 rounded-lg flex items-center';
-            uploadingItem.dataset.songId = songId; // Use data attribute to find it later
+            uploadingItem.dataset.songId = songId;
             uploadingItem.innerHTML = `<span>Uploading: ${file.name.replace('.mp3', '')}</span><div class="loader ml-auto"></div>`;
-            playlistElement.prepend(uploadingItem); // Prepend to show at top
+            playlistElement.prepend(uploadingItem);
 
             try {
-                // 1. Upload file to Storage
                 const snapshot = await uploadBytes(storageRef, file);
-                
-                // 2. Get download URL
                 const downloadURL = await getDownloadURL(snapshot.ref);
 
-                // 3. Read metadata from file
                 window.jsmediatags.read(file, {
-                    onSuccess: async function(tag) {
+                    onSuccess: async (tag) => {
                         const tags = tag.tags;
                         const songData = {
                             fileName: file.name,
@@ -349,22 +322,14 @@
                             album: tags.album || 'Unknown Album',
                             downloadURL: downloadURL,
                             storagePath: snapshot.ref.fullPath,
-                            createdAt: new Date().toISOString() // Consistent timestamp
+                            createdAt: new Date().toISOString()
                         };
-                        
-                        // 4. Save metadata to Firestore
                         const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
                         await addDoc(collection(db, songsCollectionPath), songData);
-                        
-                        // Remove the specific uploading item
-                        const uploadedItem = playlistElement.querySelector(`[data-song-id="${songId}"]`);
-                        if (uploadedItem) uploadedItem.remove();
-
-                        // The onSnapshot listener will automatically re-render the playlist
                     },
-                    onError: async function(error) {
-                        console.log(`Error reading media tags for ${file.name}, saving with basic info:`, error);
-                         const songData = {
+                    onError: async (error) => {
+                        console.warn(`Could not read tags for ${file.name}:`, error);
+                        const songData = {
                             fileName: file.name,
                             title: file.name.replace('.mp3', ''),
                             artist: 'Unknown Artist',
@@ -375,32 +340,29 @@
                         };
                         const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
                         await addDoc(collection(db, songsCollectionPath), songData);
-
-                        // Remove the specific uploading item
-                        const uploadedItem = playlistElement.querySelector(`[data-song-id="${songId}"]`);
-                        if (uploadedItem) uploadedItem.remove();
                     }
                 });
             } catch (error) {
                 console.error(`Upload of ${file.name} failed:`, error);
-                alert(`Failed to upload ${file.name}. Check console for details.`);
                 const failedItem = playlistElement.querySelector(`[data-song-id="${songId}"]`);
-                if (failedItem) failedItem.remove(); // Remove the uploading indicator on failure
+                if (failedItem) failedItem.remove();
             }
         }
 
         function renderPlaylist() {
             playlistElement.innerHTML = '';
             if (playlist.length === 0) {
-                 playlistElement.innerHTML = '<div id="playlist-message" class="text-gray-400">Your playlist is empty. Upload some songs!</div>';
+                 playlistMessage.textContent = "Your playlist is empty. Upload some songs!";
+                 playlistMessage.classList.remove('hidden');
                  return;
             }
-            // Sort playlist by creation date if available, otherwise by title
-            const sortedPlaylist = playlist.sort((a, b) => {
-                const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-                const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-                if (dateA && dateB) return dateB - dateA; // Newest first
-                return a.title.localeCompare(b.title); // Alphabetical fallback
+            playlistMessage.classList.add('hidden');
+            
+            const sortedPlaylist = [...playlist].sort((a, b) => {
+                const dateA = a.createdAt ? new Date(a.createdAt) : 0;
+                const dateB = b.createdAt ? new Date(b.createdAt) : 0;
+                if (dateA && dateB) return dateB - dateA;
+                return a.title.localeCompare(b.title);
             });
 
             sortedPlaylist.forEach((song, index) => {
@@ -411,15 +373,14 @@
                         <div class="font-medium">${song.title}</div>
                         <div class="text-sm text-gray-400">${song.artist}</div>
                     </div>
-                    <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-song-id="${song.id}">
+                    <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-song-id="${song.id}" aria-label="Delete song">
                         <i class="fas fa-trash-alt"></i>
                     </button>
                 `;
-                li.dataset.index = index;
+                li.dataset.index = playlist.findIndex(p => p.id === song.id); // Find original index
                 li.addEventListener('click', (e) => {
-                    // Prevent playing song if delete button was clicked
                     if (!e.target.closest('.delete-song-btn')) {
-                        loadSong(index);
+                        loadSong(parseInt(li.dataset.index));
                         playSong();
                     }
                 });
@@ -427,50 +388,44 @@
             });
             updateActivePlaylistItem();
             attachDeleteListeners();
+            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = false);
         }
 
         function attachDeleteListeners() {
             document.querySelectorAll('.delete-song-btn').forEach(button => {
                 button.onclick = async (event) => {
-                    event.stopPropagation(); // Prevent the parent playlist item from being clicked
+                    event.stopPropagation();
                     const songIdToDelete = event.currentTarget.dataset.songId;
                     const user = auth.currentUser;
 
-                    if (!user) {
-                        alert("You must be logged in to delete songs.");
-                        return;
-                    }
-
-                    // Basic confirmation (replace with custom modal for production)
-                    if (!confirm("Are you sure you want to delete this song?")) {
+                    if (!user || user.isAnonymous) return;
+                    
+                    // Using a custom modal instead of confirm() would be better in a real app
+                    if (!window.confirm("Are you sure you want to delete this song? This cannot be undone.")) {
                         return;
                     }
 
                     try {
-                        const songDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/songs`, songIdToDelete);
-                        const songData = playlist.find(s => s.id === songIdToDelete);
+                        const songToDelete = playlist.find(s => s.id === songIdToDelete);
+                        if (!songToDelete) throw new Error("Song not found in local playlist.");
 
-                        if (songData && songData.storagePath) {
-                            // Delete from Storage first
-                            const storageItemRef = ref(storage, songData.storagePath);
+                        // 1. Delete from Storage
+                        if (songToDelete.storagePath) {
+                            const storageItemRef = ref(storage, songToDelete.storagePath);
                             await deleteObject(storageItemRef);
-                            console.log("File deleted from Storage:", songData.storagePath);
                         }
                         
-                        // Delete from Firestore
+                        // 2. Delete from Firestore
+                        const songDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/songs`, songIdToDelete);
                         await deleteDoc(songDocRef);
-                        console.log("Song deleted from Firestore:", songIdToDelete);
 
-                        // If the currently playing song is deleted, reset the player
-                        if (currentSongIndex !== -1 && playlist[currentSongIndex] && playlist[currentSongIndex].id === songIdToDelete) {
+                        if (currentSongIndex !== -1 && playlist[currentSongIndex]?.id === songIdToDelete) {
                             resetPlayerUI();
-                            currentSongIndex = -1; // Reset index
+                            currentSongIndex = -1;
                         }
-
-                        // onSnapshot will handle re-rendering the playlist
+                        // The onSnapshot listener will automatically re-render the playlist
                     } catch (error) {
                         console.error("Error deleting song:", error);
-                        alert("Failed to delete song. Check console for details. Make sure your Firebase Storage security rules allow deletion.");
                     }
                 };
             });
@@ -487,8 +442,6 @@
             songTitle.textContent = song.title;
             songArtist.textContent = song.artist;
             
-            // For now, we don't have album art from Firestore, so we reset it.
-            // A future improvement could be to extract and store album art during upload.
             albumArt.classList.add('hidden');
             albumArtBg.style.backgroundImage = '';
             defaultIcon.classList.remove('hidden');
@@ -498,8 +451,8 @@
         
         function updateActivePlaylistItem() {
             const items = playlistElement.querySelectorAll('.playlist-item');
-            items.forEach((item, index) => {
-                if (index === currentSongIndex) {
+            items.forEach((item) => {
+                if (parseInt(item.dataset.index) === currentSongIndex) {
                     item.classList.add('active');
                 } else {
                     item.classList.remove('active');
@@ -508,10 +461,14 @@
         }
 
         function playSong() {
-            if (currentSongIndex === -1) return;
-            audioPlayer.play().catch(e => console.error("Error playing audio:", e));
-            playPauseIcon.classList.remove('fa-play');
-            playPauseIcon.classList.add('fa-pause');
+            if (currentSongIndex === -1 && playlist.length > 0) {
+                loadSong(0);
+            }
+            if(audioPlayer.src) {
+                audioPlayer.play().catch(e => console.error("Error playing audio:", e));
+                playPauseIcon.classList.remove('fa-play');
+                playPauseIcon.classList.add('fa-pause');
+            }
         }
 
         function pauseSong() {
@@ -556,11 +513,7 @@
             if (duration) {
                 progressBar.style.width = `${(currentTime / duration) * 100}%`;
                 currentTimeEl.textContent = formatTime(currentTime);
-                if(isNaN(duration)){
-                    durationEl.textContent = '0:00';
-                } else {
-                    durationEl.textContent = formatTime(duration);
-                }
+                durationEl.textContent = isNaN(duration) ? '0:00' : formatTime(duration);
             }
         });
 
