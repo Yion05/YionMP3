@@ -155,7 +155,7 @@
 
         // --- App and Firebase Variables ---
         let app, auth, db, storage;
-        let playlist = [];
+        let playlist = []; // This will now hold both uploaded songs and temporary uploading placeholders
         let currentSongIndex = -1;
         let unsubscribePlaylist = null; 
         
@@ -291,10 +291,11 @@
             const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
             const q = query(collection(db, songsCollectionPath));
 
-            if (unsubscribePlaylist) unsubscribePlaylist(); // Detach previous listener if any
+            if (unsubscribePlaylist) unsubscribePlaylist();
 
             unsubscribePlaylist = onSnapshot(q, (querySnapshot) => {
                 const newPlaylist = [];
+                // Only add songs from Firestore, effectively removing any local 'uploading' placeholders
                 querySnapshot.forEach((doc) => {
                     newPlaylist.push({ id: doc.id, ...doc.data() });
                 });
@@ -310,7 +311,6 @@
             const user = auth.currentUser;
             if (!user || user.isAnonymous) {
                 console.error("User must be logged in to upload songs.");
-                // Optionally show a user-friendly message here
                 return;
             }
             if (files.length > 0) {
@@ -327,26 +327,33 @@
                 return;
             }
             
-            // Generate a unique song ID for storage and temporary UI tracking
-            const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-]/g, '_')}`;
-            const storagePath = `artifacts/${appId}/users/${userId}/songs/${songId}`;
-            const storageRef = ref(storage, storagePath);
+            const tempSongId = `temp-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`; // Unique temp ID
             
-            // Create and prepend a temporary uploading item to the playlist UI
-            const uploadingItem = document.createElement('div');
-            uploadingItem.className = 'playlist-item p-3 rounded-lg flex items-center';
-            uploadingItem.dataset.tempSongId = songId; // Use a distinct data attribute for temporary items
-            uploadingItem.innerHTML = `<span>Uploading: ${file.name.replace('.mp3', '')}</span><div class="loader ml-auto"></div>`;
-            playlistElement.prepend(uploadingItem); // Add to the top of the playlist
+            // Create a temporary song object for immediate UI display
+            const tempSong = {
+                id: tempSongId,
+                title: file.name.replace('.mp3', ''),
+                artist: 'Uploading...',
+                status: 'uploading', // Custom status to indicate uploading
+                fileName: file.name
+            };
+            
+            // Add the temporary song to the *local* playlist array and re-render
+            playlist.unshift(tempSong); // Add to the beginning for visibility
+            renderPlaylist(); // Update UI immediately
 
             try {
+                const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-]/g, '_')}`;
+                const storagePath = `artifacts/${appId}/users/${userId}/songs/${songId}`;
+                const storageRef = ref(storage, storagePath);
+                
                 // 1. Upload file to Firebase Storage
                 const snapshot = await uploadBytes(storageRef, file);
                 const downloadURL = await getDownloadURL(snapshot.ref);
 
                 let songData = {
                     fileName: file.name,
-                    title: file.name.replace('.mp3', ''), // Default title from filename
+                    title: file.name.replace('.mp3', ''),
                     artist: 'Unknown Artist',
                     album: 'Unknown Album',
                     downloadURL: downloadURL,
@@ -354,13 +361,10 @@
                     createdAt: new Date().toISOString()
                 };
 
-                // 2. Attempt to read MP3 tags using jsmediatags
+                // 2. Attempt to read MP3 tags
                 try {
                     const tag = await new Promise((resolve, reject) => {
-                        window.jsmediatags.read(file, {
-                            onSuccess: resolve,
-                            onError: reject
-                        });
+                        window.jsmediatags.read(file, { onSuccess: resolve, onError: reject });
                     });
                     const tags = tag.tags;
                     songData.title = tags.title || songData.title;
@@ -368,30 +372,42 @@
                     songData.album = tags.album || songData.album;
                 } catch (tagError) {
                     console.warn(`Could not read tags for ${file.name}:`, tagError);
-                    // Continue even if tag reading fails
                 }
 
                 // 3. Add song metadata to Firestore
                 const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
                 await addDoc(collection(db, songsCollectionPath), songData);
                 
-                // Firestore's onSnapshot listener will now trigger and re-render the playlist
-                // which will include this newly added song and remove any temporary items.
+                // onSnapshot will now fetch the real song and update the playlist.
+                // The temporary song will be implicitly removed as onSnapshot rebuilds the 'playlist' array from Firestore data.
 
             } catch (error) {
                 console.error(`Upload of ${file.name} failed:`, error);
-                // Optionally display an error message to the user
-            } finally {
-                // Always remove the temporary uploading item from the DOM
-                const tempItem = playlistElement.querySelector(`[data-temp-song-id="${songId}"]`);
-                if (tempItem) {
-                    tempItem.remove();
-                }
+                // Remove the temporary song from the local playlist if upload fails
+                playlist = playlist.filter(s => s.id !== tempSongId);
+                renderPlaylist(); // Re-render to reflect the removal of the failed upload
+                // Optionally show a user-friendly error message, e.g., in a temporary modal
+                showTemporaryMessage(`Failed to upload ${file.name}. Please try again.`, 'error');
             }
         }
 
+        // Add a helper for temporary messages (like toast notifications)
+        function showTemporaryMessage(message, type = 'info', duration = 3000) {
+            const messageBox = document.createElement('div');
+            messageBox.textContent = message;
+            messageBox.className = `fixed bottom-5 left-1/2 -translate-x-1/2 px-6 py-3 rounded-lg shadow-lg text-white font-semibold z-50 transition-opacity duration-300 ${type === 'error' ? 'bg-red-600' : 'bg-green-600'}`;
+            document.body.appendChild(messageBox);
+
+            setTimeout(() => {
+                messageBox.style.opacity = '0';
+                messageBox.addEventListener('transitionend', () => messageBox.remove());
+            }, duration);
+        }
+
+
         function renderPlaylist() {
             playlistElement.innerHTML = ''; // Clear existing playlist items
+
             if (playlist.length === 0) {
                  playlistMessage.textContent = "Your playlist is empty. Upload some songs!";
                  playlistMessage.classList.remove('hidden');
@@ -402,32 +418,48 @@
             
             // Sort playlist by creation date (newest first), fallback to title
             const sortedPlaylist = [...playlist].sort((a, b) => {
+                // Prioritize 'uploading' status items to appear at the top
+                if (a.status === 'uploading' && b.status !== 'uploading') return -1;
+                if (b.status === 'uploading' && a.status !== 'uploading') return 1;
+
                 const dateA = a.createdAt ? new Date(a.createdAt) : 0;
                 const dateB = b.createdAt ? new Date(b.createdAt) : 0;
-                if (dateA && dateB) return dateB - dateA;
+                if (dateA && dateB) return dateB - dateA; // Newest first
                 return a.title.localeCompare(b.title);
             });
 
             sortedPlaylist.forEach((song, index) => {
                 const li = document.createElement('div');
                 li.className = 'playlist-item p-3 rounded-lg cursor-pointer transition-colors flex items-center justify-between';
-                li.innerHTML = `
-                    <div>
-                        <div class="font-medium">${song.title}</div>
-                        <div class="text-sm text-gray-400">${song.artist}</div>
-                    </div>
-                    <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-song-id="${song.id}" aria-label="Delete song">
-                        <i class="fas fa-trash-alt"></i>
-                    </button>
-                `;
-                li.dataset.index = playlist.findIndex(p => p.id === song.id); // Store original index for consistent playback
-                li.addEventListener('click', (e) => {
-                    // Only load/play song if the delete button was not clicked
-                    if (!e.target.closest('.delete-song-btn')) {
-                        loadSong(parseInt(li.dataset.index));
-                        playSong();
-                    }
-                });
+                
+                // Conditionally render loader for uploading songs
+                if (song.status === 'uploading') {
+                    li.innerHTML = `
+                        <div>
+                            <div class="font-medium">${song.title}</div>
+                            <div class="text-sm text-gray-400">${song.artist}</div>
+                        </div>
+                        <div class="loader ml-auto"></div>
+                    `;
+                    li.classList.add('opacity-70', 'cursor-not-allowed'); // Make it look less interactive
+                } else {
+                    li.innerHTML = `
+                        <div>
+                            <div class="font-medium">${song.title}</div>
+                            <div class="text-sm text-gray-400">${song.artist}</div>
+                        </div>
+                        <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-song-id="${song.id}" aria-label="Delete song">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                    `;
+                    li.dataset.index = playlist.findIndex(p => p.id === song.id); // Store original index for consistent playback
+                    li.addEventListener('click', (e) => {
+                        if (!e.target.closest('.delete-song-btn')) {
+                            loadSong(parseInt(li.dataset.index));
+                            playSong();
+                        }
+                    });
+                }
                 playlistElement.appendChild(li);
             });
             updateActivePlaylistItem();
