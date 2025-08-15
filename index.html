@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Music Player</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/jsmediatags@3.9.5/dist/jsmediatags.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .player-container {
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        .progress-bar-container {
+            height: 4px;
+            background-color: rgba(255, 255, 255, 0.2);
+            cursor: pointer;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #1DB954;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+        .playlist-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .playlist-item.active {
+            background-color: rgba(29, 185, 84, 0.3);
+        }
+        .loader {
+            border: 4px solid rgba(255, 255, 255, 0.2);
+            border-left-color: #1DB954;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+    <div class="w-full max-w-4xl mx-auto rounded-lg overflow-hidden shadow-2xl flex" style="height: 600px;">
+        <!-- Sidebar/Playlist -->
+        <div class="w-1/3 bg-black bg-opacity-50 p-6 flex flex-col">
+            <div id="user-profile" class="hidden items-center mb-4">
+                <img id="user-photo" class="w-10 h-10 rounded-full mr-3">
+                <span id="user-name" class="font-semibold"></span>
+                <button id="logout-btn" class="ml-auto text-gray-400 hover:text-white"><i class="fas fa-sign-out-alt"></i></button>
+            </div>
+            <h2 class="text-xl font-semibold mb-4">Playlist</h2>
+            <div class="flex-grow overflow-y-auto" id="playlist">
+                 <div id="playlist-message" class="text-gray-400">Please log in to see your music.</div>
+            </div>
+            <div class="mt-4">
+                 <button id="login-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full text-center block">
+                    <i class="fab fa-google mr-2"></i>Login with Google
+                </button>
+                <label for="file-upload" id="add-songs-btn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full cursor-pointer text-center block hidden">
+                    <i class="fas fa-plus mr-2"></i>Upload Songs
+                </label>
+                <input id="file-upload" type="file" accept=".mp3" multiple class="hidden">
+            </div>
+        </div>
+
+        <!-- Main Player -->
+        <div class="w-2/3 bg-gray-800 bg-opacity-70 p-8 flex flex-col items-center justify-center text-center player-container relative">
+            <div id="album-art-bg" class="absolute inset-0 bg-cover bg-center opacity-20 transition-all duration-1000"></div>
+            <div class="relative z-10 flex flex-col items-center">
+                <div id="album-art-container" class="w-64 h-64 md:w-80 md:h-80 bg-gray-700 rounded-lg shadow-lg mb-6 flex items-center justify-center">
+                    <i class="fas fa-music text-6xl text-gray-400"></i>
+                    <img id="album-art" src="" class="hidden w-full h-full object-cover rounded-lg">
+                </div>
+                <h1 id="song-title" class="text-3xl font-bold">No Song Selected</h1>
+                <p id="song-artist" class="text-lg text-gray-400 mb-6">Login and select a song to play</p>
+
+                <!-- Progress Bar -->
+                <div class="w-full max-w-md">
+                    <div id="progress-bar-container" class="progress-bar-container rounded-full mb-2">
+                        <div id="progress-bar" class="progress-bar rounded-full"></div>
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-400">
+                        <span id="current-time">0:00</span>
+                        <span id="duration">0:00</span>
+                    </div>
+                </div>
+
+                <!-- Controls -->
+                <div class="flex items-center space-x-8 mt-6">
+                    <button id="prev-btn" class="text-gray-400 hover:text-white transition-colors text-2xl disabled:opacity-50" disabled>
+                        <i class="fas fa-backward-step"></i>
+                    </button>
+                    <button id="play-pause-btn" class="bg-green-600 hover:bg-green-500 text-white w-16 h-16 rounded-full flex items-center justify-center text-2xl shadow-lg transform hover:scale-105 transition-transform disabled:opacity-50 disabled:bg-gray-600" disabled>
+                        <i id="play-pause-icon" class="fas fa-play"></i>
+                    </button>
+                    <button id="next-btn" class="text-gray-400 hover:text-white transition-colors text-2xl disabled:opacity-50" disabled>
+                        <i class="fas fa-forward-step"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <audio id="audio-player" class="hidden" crossOrigin="anonymous"></audio>
+
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, signInWithCustomToken, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, getDocs, onSnapshot, setDoc, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+        // DOM Elements
+        const audioPlayer = document.getElementById('audio-player');
+        const fileUpload = document.getElementById('file-upload');
+        const playlistElement = document.getElementById('playlist');
+        const albumArt = document.getElementById('album-art');
+        const albumArtBg = document.getElementById('album-art-bg');
+        const defaultIcon = document.querySelector('#album-art-container i');
+        const songTitle = document.getElementById('song-title');
+        const songArtist = document.getElementById('song-artist');
+        const playPauseBtn = document.getElementById('play-pause-btn');
+        const playPauseIcon = document.getElementById('play-pause-icon');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+        const progressBar = document.getElementById('progress-bar');
+        const progressBarContainer = document.getElementById('progress-bar-container');
+        const currentTimeEl = document.getElementById('current-time');
+        const durationEl = document.getElementById('duration');
+        const loginBtn = document.getElementById('login-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+        const addSongsBtn = document.getElementById('add-songs-btn');
+        const userProfile = document.getElementById('user-profile');
+        const userPhoto = document.getElementById('user-photo');
+        const userName = document.getElementById('user-name');
+        const playlistMessage = document.getElementById('playlist-message');
+
+        // Firebase Config
+        const firebaseConfig = {
+            apiKey: "AIzaSyAgqpFAzTHaw0-bUTdLJTyP_lmv1a_MDZ8",
+            authDomain: "mp3-playlist-37ecd.firebaseapp.com",
+            projectId: "mp3-playlist-37ecd",
+            storageBucket: "mp3-playlist-37ecd.firebasestorage.app",
+            messagingSenderId: "53190276396",
+            appId: "1:53190276396:web:68e4df34b0b6036399a889",
+            measurementId: "G-Z9XKR4EN2Y"
+        };
+
+        let app, auth, db, storage;
+        let playlist = [];
+        let currentSongIndex = -1;
+        let unsubscribePlaylist = null; // To store the onSnapshot listener
+
+        // Initialize Firebase if config is available
+        if (firebaseConfig) {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            storage = getStorage(app);
+        } else {
+            console.error("Firebase config not found.");
+            // Disable UI that requires Firebase
+            loginBtn.disabled = true;
+            loginBtn.textContent = "Firebase Unavailable";
+        }
+
+        // --- AUTHENTICATION ---
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                // User is signed in
+                updateUIForLogin(user);
+                fetchPlaylist(user.uid);
+            } else {
+                // User is signed out
+                updateUIForLogout();
+            }
+        });
+        
+        // Handle initial auth token if provided
+        (async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                try {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } catch (error) {
+                    console.error("Error signing in with custom token:", error);
+                    await signInAnonymously(auth);
+                }
+            } else {
+                // No initial token, user needs to log in manually or is already logged in via session.
+            }
+        })();
+
+
+        loginBtn.addEventListener('click', async () => {
+            const provider = new GoogleAuthProvider();
+            try {
+                await signInWithPopup(auth, provider);
+            } catch (error) {
+                console.error("Error during sign-in:", error);
+            }
+        });
+
+        logoutBtn.addEventListener('click', async () => {
+            try {
+                await signOut(auth);
+            } catch (error) {
+                console.error("Error during sign-out:", error);
+            }
+        });
+
+        // --- UI UPDATES ---
+        function updateUIForLogin(user) {
+            userProfile.classList.remove('hidden');
+            userProfile.classList.add('flex');
+            userPhoto.src = user.photoURL;
+            userName.textContent = user.displayName;
+            loginBtn.classList.add('hidden');
+            addSongsBtn.classList.remove('hidden');
+            logoutBtn.classList.remove('hidden');
+            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = false);
+        }
+
+        function updateUIForLogout() {
+            userProfile.classList.add('hidden');
+            loginBtn.classList.remove('hidden');
+            addSongsBtn.classList.add('hidden');
+            logoutBtn.classList.add('hidden');
+            playlistElement.innerHTML = '<div id="playlist-message" class="text-gray-400">Please log in to see your music.</div>';
+            playlist = [];
+            currentSongIndex = -1;
+            resetPlayerUI();
+            if (unsubscribePlaylist) {
+                unsubscribePlaylist(); // Detach the listener
+            }
+        }
+
+        function resetPlayerUI() {
+            audioPlayer.src = '';
+            songTitle.textContent = 'No Song Selected';
+            songArtist.textContent = 'Login and select a song to play';
+            albumArt.classList.add('hidden');
+            defaultIcon.classList.remove('hidden');
+            albumArtBg.style.backgroundImage = '';
+            progressBar.style.width = '0%';
+            currentTimeEl.textContent = '0:00';
+            durationEl.textContent = '0:00';
+            playPauseIcon.classList.remove('fa-pause');
+            playPauseIcon.classList.add('fa-play');
+            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = true);
+        }
+
+        // --- PLAYLIST & FIRESTORE ---
+        function fetchPlaylist(userId) {
+             const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+            const q = collection(db, songsCollectionPath);
+
+            // Detach any existing listener before attaching a new one
+            if (unsubscribePlaylist) {
+                unsubscribePlaylist();
+            }
+
+            unsubscribePlaylist = onSnapshot(q, (querySnapshot) => {
+                playlist = [];
+                querySnapshot.forEach((doc) => {
+                    playlist.push({ id: doc.id, ...doc.data() });
+                });
+                renderPlaylist();
+                if (playlist.length === 0) {
+                    playlistMessage.textContent = "Your playlist is empty. Upload some songs!";
+                    playlistMessage.classList.remove('hidden');
+                }
+            }, (error) => {
+                console.error("Error fetching playlist:", error);
+            });
+        }
+
+        fileUpload.addEventListener('change', (event) => {
+            const files = event.target.files;
+            const user = auth.currentUser;
+            if (!user) {
+                alert("You must be logged in to upload songs.");
+                return;
+            }
+            if (files.length > 0) {
+                for (const file of files) {
+                    uploadSong(file, user.uid);
+                }
+            }
+        });
+
+        async function uploadSong(file, userId) {
+            if (!file.type.startsWith('audio/')) {
+                console.error("Invalid file type:", file.name);
+                return;
+            }
+            
+            const songId = `${Date.now()}-${file.name}`;
+            const storageRef = ref(storage, `artifacts/${appId}/users/${userId}/songs/${songId}`);
+            
+            // Show uploading status in playlist
+            const uploadingItem = document.createElement('div');
+            uploadingItem.className = 'playlist-item p-3 rounded-lg flex items-center';
+            uploadingItem.innerHTML = `<span>${file.name.replace('.mp3', '')}</span><div class="loader ml-auto"></div>`;
+            playlistElement.appendChild(uploadingItem);
+
+
+            try {
+                // 1. Upload file to Storage
+                const snapshot = await uploadBytes(storageRef, file);
+                
+                // 2. Get download URL
+                const downloadURL = await getDownloadURL(snapshot.ref);
+
+                // 3. Read metadata from file
+                window.jsmediatags.read(file, {
+                    onSuccess: async function(tag) {
+                        const tags = tag.tags;
+                        const songData = {
+                            fileName: file.name,
+                            title: tags.title || file.name.replace('.mp3', ''),
+                            artist: tags.artist || 'Unknown Artist',
+                            album: tags.album || 'Unknown Album',
+                            downloadURL: downloadURL,
+                            storagePath: snapshot.ref.fullPath,
+                            createdAt: new Date()
+                        };
+                        
+                        // 4. Save metadata to Firestore
+                        const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+                        await addDoc(collection(db, songsCollectionPath), songData);
+                        
+                        // The onSnapshot listener will automatically re-render the playlist
+                    },
+                    onError: async function(error) {
+                        console.log('Error reading media tags, saving with basic info:', error);
+                         const songData = {
+                            fileName: file.name,
+                            title: file.name.replace('.mp3', ''),
+                            artist: 'Unknown Artist',
+                            album: 'Unknown Album',
+                            downloadURL: downloadURL,
+                            storagePath: snapshot.ref.fullPath,
+                            createdAt: new Date()
+                        };
+                        const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+                        await addDoc(collection(db, songsCollectionPath), songData);
+                    }
+                });
+            } catch (error) {
+                console.error("Upload failed:", error);
+                uploadingItem.remove(); // Remove the uploading indicator on failure
+            }
+        }
+
+        function renderPlaylist() {
+            playlistElement.innerHTML = '';
+            if (playlist.length === 0) {
+                 playlistElement.innerHTML = '<div id="playlist-message" class="text-gray-400">Your playlist is empty. Upload some songs!</div>';
+                 return;
+            }
+            playlist.forEach((song, index) => {
+                const li = document.createElement('div');
+                li.className = 'playlist-item p-3 rounded-lg cursor-pointer transition-colors';
+                li.textContent = song.title;
+                li.dataset.index = index;
+                li.addEventListener('click', () => {
+                    loadSong(index);
+                    playSong();
+                });
+                playlistElement.appendChild(li);
+            });
+            updateActivePlaylistItem();
+        }
+        
+        // --- MUSIC PLAYER LOGIC ---
+        function loadSong(index) {
+            if (index < 0 || index >= playlist.length) return;
+            
+            currentSongIndex = index;
+            const song = playlist[currentSongIndex];
+            audioPlayer.src = song.downloadURL;
+
+            songTitle.textContent = song.title;
+            songArtist.textContent = song.artist;
+            
+            // For now, we don't have album art from Firestore, so we reset it.
+            // A future improvement could be to extract and store album art during upload.
+            albumArt.classList.add('hidden');
+            albumArtBg.style.backgroundImage = '';
+            defaultIcon.classList.remove('hidden');
+
+            updateActivePlaylistItem();
+        }
+        
+        function updateActivePlaylistItem() {
+            const items = playlistElement.querySelectorAll('.playlist-item');
+            items.forEach((item, index) => {
+                if (index === currentSongIndex) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+        }
+
+        function playSong() {
+            if (currentSongIndex === -1) return;
+            audioPlayer.play().catch(e => console.error("Error playing audio:", e));
+            playPauseIcon.classList.remove('fa-play');
+            playPauseIcon.classList.add('fa-pause');
+        }
+
+        function pauseSong() {
+            audioPlayer.pause();
+            playPauseIcon.classList.remove('fa-pause');
+            playPauseIcon.classList.add('fa-play');
+        }
+
+        playPauseBtn.addEventListener('click', () => {
+            if (audioPlayer.paused) {
+                playSong();
+            } else {
+                pauseSong();
+            }
+        });
+
+        prevBtn.addEventListener('click', () => {
+            let newIndex = currentSongIndex - 1;
+            if (newIndex < 0) newIndex = playlist.length - 1;
+            if (playlist.length > 0) {
+                loadSong(newIndex);
+                playSong();
+            }
+        });
+        
+        nextBtn.addEventListener('click', playNextSong);
+        audioPlayer.addEventListener('ended', playNextSong);
+
+        function playNextSong() {
+            let newIndex = currentSongIndex + 1;
+            if (newIndex >= playlist.length) newIndex = 0;
+            if (playlist.length > 0) {
+                loadSong(newIndex);
+                playSong();
+            } else {
+                resetPlayerUI();
+            }
+        }
+
+        audioPlayer.addEventListener('timeupdate', () => {
+            const { currentTime, duration } = audioPlayer;
+            if (duration) {
+                progressBar.style.width = `${(currentTime / duration) * 100}%`;
+                currentTimeEl.textContent = formatTime(currentTime);
+                if(isNaN(duration)){
+                    durationEl.textContent = '0:00';
+                } else {
+                    durationEl.textContent = formatTime(duration);
+                }
+            }
+        });
+
+        progressBarContainer.addEventListener('click', (e) => {
+            if (!audioPlayer.duration) return;
+            const width = progressBarContainer.clientWidth;
+            const clickX = e.offsetX;
+            audioPlayer.currentTime = (clickX / width) * audioPlayer.duration;
+        });
+
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${minutes}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+    </script>
+</body>
+</html>
