@@ -7,7 +7,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
-    <!-- jsmediatags is needed again to read metadata from local files -->
     <script src="https://cdn.jsdelivr.net/npm/jsmediatags@3.9.5/dist/jsmediatags.min.js"></script>
     <style>
         body {
@@ -34,6 +33,17 @@
         .playlist-item.active {
             background-color: rgba(29, 185, 84, 0.3);
         }
+        .loader {
+            border: 4px solid rgba(255, 255, 255, 0.2);
+            border-left-color: #1DB954;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
@@ -47,15 +57,14 @@
             </div>
             <h2 class="text-xl font-semibold mb-4">Playlist</h2>
             <div class="flex-grow overflow-y-auto" id="playlist">
-                 <div id="playlist-message" class="text-gray-400">Open local MP3 files to begin.</div>
+                 <div id="playlist-message" class="text-gray-400">Please log in to see your music.</div>
             </div>
             <div class="mt-4">
                  <button id="login-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full text-center block">
                     <i class="fab fa-google mr-2"></i>Login with Google
                 </button>
-                <!-- Changed to a file explorer button -->
-                <label for="file-upload" id="add-songs-btn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full cursor-pointer text-center block">
-                    <i class="fas fa-folder-open mr-2"></i>Open MP3 Files
+                <label for="file-upload" id="add-songs-btn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full cursor-pointer text-center block hidden">
+                    <i class="fas fa-plus mr-2"></i>Upload Songs
                 </label>
                 <input id="file-upload" type="file" accept=".mp3" multiple class="hidden">
             </div>
@@ -70,7 +79,7 @@
                     <img id="album-art" src="" class="hidden w-full h-full object-cover rounded-lg" alt="Album art">
                 </div>
                 <h1 id="song-title" class="text-3xl font-bold">No Song Selected</h1>
-                <p id="song-artist" class="text-lg text-gray-400 mb-6">Select a song to play</p>
+                <p id="song-artist" class="text-lg text-gray-400 mb-6">Login and select a song to play</p>
 
                 <!-- Progress Bar -->
                 <div class="w-full max-w-md">
@@ -102,10 +111,12 @@
     <audio id="audio-player" class="hidden" crossOrigin="anonymous"></audio>
 
     <script type="module">
-        // Firebase Imports (only for Auth, not Firestore for playlist)
+        // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        
+        import { getFirestore, collection, doc, addDoc, onSnapshot, query, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
         // DOM Elements
         const audioPlayer = document.getElementById('audio-player');
         const fileUpload = document.getElementById('file-upload');
@@ -132,12 +143,13 @@
         const playlistMessage = document.getElementById('playlist-message');
 
         // --- App and Firebase Variables ---
-        let app, auth;
-        // Playlist is now a local, in-memory array
+        let app, auth, db, storage;
         let playlist = [];
         let currentSongIndex = -1;
+        let unsubscribePlaylist = null; 
         
-        // --- Firebase Config (for Auth) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-music-app';
+        
         const firebaseConfig = {
          apiKey: "AIzaSyAgqpFAzTHaw0-bUTdLJTyP_lmv1a_MDZ8",
          authDomain: "mp3-playlist-37ecd.firebaseapp.com",
@@ -153,17 +165,24 @@
             try {
                 app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
+                db = getFirestore(app);
+                storage = getStorage(app);
             } catch (error) {
                 console.error("Error initializing Firebase:", error);
+                loginBtn.disabled = true;
+                loginBtn.textContent = "Firebase Error";
             }
         } else {
             console.error("Firebase config not found.");
+            loginBtn.disabled = true;
+            loginBtn.textContent = "Firebase Unavailable";
         }
 
-        // --- AUTHENTICATION (Optional, for profile display) ---
+        // --- AUTHENTICATION ---
         onAuthStateChanged(auth, (user) => {
             if (user && !user.isAnonymous) {
                 updateUIForLogin(user);
+                fetchPlaylist(user.uid);
             } else {
                 updateUIForLogout();
             }
@@ -203,20 +222,32 @@
             userPhoto.src = user.photoURL || `https://placehold.co/40x40/777/FFF?text=${user.displayName ? user.displayName[0] : 'U'}`;
             userName.textContent = user.displayName || 'User';
             loginBtn.classList.add('hidden');
+            addSongsBtn.classList.remove('hidden');
             logoutBtn.classList.remove('hidden');
+            playlistMessage.classList.add('hidden');
+            [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = playlist.length === 0);
         }
 
         function updateUIForLogout() {
             userProfile.classList.add('hidden');
             loginBtn.classList.remove('hidden');
+            addSongsBtn.classList.add('hidden');
             logoutBtn.classList.add('hidden');
-            // We don't clear the local playlist on logout, user might just want to log in
+            playlistElement.innerHTML = '';
+            playlistMessage.textContent = "Please log in to see your music.";
+            playlistMessage.classList.remove('hidden');
+            playlist = [];
+            currentSongIndex = -1;
+            resetPlayerUI();
+            if (unsubscribePlaylist) {
+                unsubscribePlaylist();
+            }
         }
 
         function resetPlayerUI() {
             audioPlayer.src = '';
             songTitle.textContent = 'No Song Selected';
-            songArtist.textContent = 'Select a song to play';
+            songArtist.textContent = 'Login and select a song to play';
             albumArt.classList.add('hidden');
             defaultIcon.classList.remove('hidden');
             albumArtBg.style.backgroundImage = '';
@@ -228,61 +259,114 @@
             [prevBtn, playPauseBtn, nextBtn].forEach(btn => btn.disabled = true);
         }
 
-        // --- LOCAL PLAYLIST HANDLING ---
+        // --- PLAYLIST & FIRESTORE ---
+        function fetchPlaylist(userId) {
+            if (!db) return;
+            const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+            const q = query(collection(db, songsCollectionPath));
+
+            if (unsubscribePlaylist) unsubscribePlaylist();
+
+            unsubscribePlaylist = onSnapshot(q, (querySnapshot) => {
+                const newPlaylist = [];
+                querySnapshot.forEach((doc) => {
+                    newPlaylist.push({ id: doc.id, ...doc.data() });
+                });
+                playlist = newPlaylist;
+                renderPlaylist();
+            }, (error) => {
+                console.error("Error fetching playlist:", error);
+            });
+        }
+
         fileUpload.addEventListener('change', (event) => {
             const files = event.target.files;
-            if (files.length === 0) return;
-
-            playlistMessage.textContent = "Loading songs...";
-
-            for (const file of files) {
-                if (!file.type.startsWith('audio/mpeg')) {
-                    console.warn(`Skipping non-mp3 file: ${file.name}`);
-                    continue;
+            const user = auth.currentUser;
+            if (!user || user.isAnonymous) {
+                console.error("User must be logged in to upload songs.");
+                return;
+            }
+            if (files.length > 0) {
+                for (const file of files) {
+                    uploadSong(file, user.uid);
                 }
+            }
+        });
 
-                // Use jsmediatags to read metadata
+        async function uploadSong(file, userId) {
+            if (!file.type.startsWith('audio/')) {
+                console.warn(`Skipping non-audio file: ${file.name}`);
+                return;
+            }
+            
+            const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+            const storagePath = `artifacts/${appId}/users/${userId}/songs/${songId}`;
+            const storageRef = ref(storage, storagePath);
+            
+            const uploadingItem = document.createElement('div');
+            uploadingItem.className = 'playlist-item p-3 rounded-lg flex items-center';
+            uploadingItem.dataset.songId = songId;
+            uploadingItem.innerHTML = `<span>Uploading: ${file.name.replace('.mp3', '')}</span><div class="loader ml-auto"></div>`;
+            playlistElement.prepend(uploadingItem);
+
+            try {
+                const snapshot = await uploadBytes(storageRef, file);
+                const downloadURL = await getDownloadURL(snapshot.ref);
+
                 window.jsmediatags.read(file, {
-                    onSuccess: (tag) => {
+                    onSuccess: async (tag) => {
                         const tags = tag.tags;
                         const songData = {
+                            fileName: file.name,
                             title: tags.title || file.name.replace('.mp3', ''),
                             artist: tags.artist || 'Unknown Artist',
                             album: tags.album || 'Unknown Album',
-                            url: URL.createObjectURL(file), // Create a temporary URL for the local file
-                            id: `${Date.now()}-${file.name}` // Unique ID for this session
+                            downloadURL: downloadURL,
+                            storagePath: snapshot.ref.fullPath,
+                            createdAt: new Date().toISOString()
                         };
-                        playlist.push(songData);
-                        renderPlaylist();
+                        const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+                        await addDoc(collection(db, songsCollectionPath), songData);
                     },
-                    onError: (error) => {
+                    onError: async (error) => {
                         console.warn(`Could not read tags for ${file.name}:`, error);
                         const songData = {
+                            fileName: file.name,
                             title: file.name.replace('.mp3', ''),
                             artist: 'Unknown Artist',
                             album: 'Unknown Album',
-                            url: URL.createObjectURL(file),
-                            id: `${Date.now()}-${file.name}`
+                            downloadURL: downloadURL,
+                            storagePath: snapshot.ref.fullPath,
+                            createdAt: new Date().toISOString()
                         };
-                        playlist.push(songData);
-                        renderPlaylist();
+                        const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+                        await addDoc(collection(db, songsCollectionPath), songData);
                     }
                 });
+            } catch (error) {
+                console.error(`Upload of ${file.name} failed:`, error);
+                const failedItem = playlistElement.querySelector(`[data-song-id="${songId}"]`);
+                if (failedItem) failedItem.remove();
             }
-            // Clear the input value to allow selecting the same file again
-            event.target.value = '';
-        });
+        }
 
         function renderPlaylist() {
             playlistElement.innerHTML = '';
             if (playlist.length === 0) {
-                 playlistMessage.textContent = "Open local MP3 files to begin.";
+                 playlistMessage.textContent = "Your playlist is empty. Upload some songs!";
                  playlistMessage.classList.remove('hidden');
                  return;
             }
             playlistMessage.classList.add('hidden');
             
-            playlist.forEach((song, index) => {
+            const sortedPlaylist = [...playlist].sort((a, b) => {
+                const dateA = a.createdAt ? new Date(a.createdAt) : 0;
+                const dateB = b.createdAt ? new Date(b.createdAt) : 0;
+                if (dateA && dateB) return dateB - dateA;
+                return a.title.localeCompare(b.title);
+            });
+
+            sortedPlaylist.forEach((song) => {
                 const li = document.createElement('div');
                 li.className = 'playlist-item p-3 rounded-lg cursor-pointer transition-colors flex items-center justify-between';
                 li.innerHTML = `
@@ -290,11 +374,11 @@
                         <div class="font-medium">${song.title}</div>
                         <div class="text-sm text-gray-400">${song.artist}</div>
                     </div>
-                    <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-index="${index}" aria-label="Delete song">
+                    <button class="text-gray-400 hover:text-red-500 text-lg delete-song-btn" data-song-id="${song.id}" aria-label="Delete song">
                         <i class="fas fa-trash-alt"></i>
                     </button>
                 `;
-                li.dataset.index = index;
+                li.dataset.index = playlist.findIndex(p => p.id === song.id);
                 li.addEventListener('click', (e) => {
                     if (!e.target.closest('.delete-song-btn')) {
                         loadSong(parseInt(li.dataset.index));
@@ -310,26 +394,36 @@
 
         function attachDeleteListeners() {
             document.querySelectorAll('.delete-song-btn').forEach(button => {
-                button.onclick = (event) => {
+                button.onclick = async (event) => {
                     event.stopPropagation();
-                    const indexToDelete = parseInt(event.currentTarget.dataset.index);
+                    const songIdToDelete = event.currentTarget.dataset.songId;
+                    const user = auth.currentUser;
+
+                    if (!user || user.isAnonymous) return;
                     
-                    // If deleting the currently playing song
-                    if (indexToDelete === currentSongIndex) {
-                        resetPlayerUI();
+                    if (!window.confirm("Are you sure you want to delete this song? This cannot be undone.")) {
+                        return;
                     }
-                    
-                    // Remove song from local playlist
-                    playlist.splice(indexToDelete, 1);
-                    
-                    // Adjust current song index if needed
-                    if (currentSongIndex > indexToDelete) {
-                        currentSongIndex--;
-                    } else if (currentSongIndex === indexToDelete) {
-                        currentSongIndex = -1;
+
+                    try {
+                        const songToDelete = playlist.find(s => s.id === songIdToDelete);
+                        if (!songToDelete) throw new Error("Song not found in local playlist.");
+
+                        if (songToDelete.storagePath) {
+                            const storageItemRef = ref(storage, songToDelete.storagePath);
+                            await deleteObject(storageItemRef);
+                        }
+                        
+                        const songDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/songs`, songIdToDelete);
+                        await deleteDoc(songDocRef);
+
+                        if (currentSongIndex !== -1 && playlist[currentSongIndex]?.id === songIdToDelete) {
+                            resetPlayerUI();
+                            currentSongIndex = -1;
+                        }
+                    } catch (error) {
+                        console.error("Error deleting song:", error);
                     }
-                    
-                    renderPlaylist(); // Re-render the playlist with updated indices
                 };
             });
         }
@@ -340,7 +434,7 @@
             
             currentSongIndex = index;
             const song = playlist[currentSongIndex];
-            audioPlayer.src = song.url;
+            audioPlayer.src = song.downloadURL;
 
             songTitle.textContent = song.title;
             songArtist.textContent = song.artist;
