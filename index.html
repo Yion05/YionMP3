@@ -294,15 +294,18 @@
             if (unsubscribePlaylist) unsubscribePlaylist();
 
             unsubscribePlaylist = onSnapshot(q, (querySnapshot) => {
+                console.log(`[Firestore] onSnapshot triggered. Changes detected.`);
                 const newPlaylist = [];
                 // Only add songs from Firestore, effectively removing any local 'uploading' placeholders
                 querySnapshot.forEach((doc) => {
                     newPlaylist.push({ id: doc.id, ...doc.data() });
                 });
+                console.log(`[Firestore] New playlist fetched from Firestore (${newPlaylist.length} songs):`, newPlaylist);
                 playlist = newPlaylist;
                 renderPlaylist();
             }, (error) => {
-                console.error("Error fetching playlist:", error);
+                console.error("[Firestore] Error fetching playlist:", error);
+                showTemporaryMessage(`Error loading playlist: ${error.message}`, 'error');
             });
         }
 
@@ -311,6 +314,7 @@
             const user = auth.currentUser;
             if (!user || user.isAnonymous) {
                 console.error("User must be logged in to upload songs.");
+                showTemporaryMessage("Please log in to upload songs.", 'error');
                 return;
             }
             if (files.length > 0) {
@@ -322,8 +326,15 @@
         });
 
         async function uploadSong(file, userId) {
+            console.log(`[Upload] Starting upload for: ${file.name}`);
             if (!file.type.startsWith('audio/')) {
-                console.warn(`Skipping non-audio file: ${file.name}`);
+                console.warn(`[Upload] Skipping non-audio file: ${file.name}`);
+                showTemporaryMessage(`Skipping non-audio file: ${file.name}`, 'info');
+                return;
+            }
+            if (!storage || !db) {
+                console.error("[Upload] Firebase Storage or Firestore not initialized.");
+                showTemporaryMessage(`Firebase services not ready. Please try again.`, 'error');
                 return;
             }
             
@@ -341,15 +352,17 @@
             // Add the temporary song to the *local* playlist array and re-render
             playlist.unshift(tempSong); // Add to the beginning for visibility
             renderPlaylist(); // Update UI immediately
+            console.log(`[Upload] Added temporary song to local playlist: ${file.name}`);
 
             try {
                 const songId = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-]/g, '_')}`;
                 const storagePath = `artifacts/${appId}/users/${userId}/songs/${songId}`;
                 const storageRef = ref(storage, storagePath);
                 
-                // 1. Upload file to Firebase Storage
+                console.log(`[Upload] Uploading file to storage: ${file.name}`);
                 const snapshot = await uploadBytes(storageRef, file);
                 const downloadURL = await getDownloadURL(snapshot.ref);
+                console.log(`[Upload] File uploaded, URL: ${downloadURL}`);
 
                 let songData = {
                     fileName: file.name,
@@ -370,24 +383,26 @@
                     songData.title = tags.title || songData.title;
                     songData.artist = tags.artist || songData.artist;
                     songData.album = tags.album || songData.album;
+                    console.log(`[Upload] ID3 tags read for ${file.name}:`, tags);
                 } catch (tagError) {
-                    console.warn(`Could not read tags for ${file.name}:`, tagError);
+                    console.warn(`[Upload] Could not read tags for ${file.name}:`, tagError);
                 }
 
                 // 3. Add song metadata to Firestore
                 const songsCollectionPath = `artifacts/${appId}/users/${userId}/songs`;
+                console.log(`[Upload] Adding metadata to Firestore for: ${file.name}`);
                 await addDoc(collection(db, songsCollectionPath), songData);
+                console.log(`[Upload] Metadata added to Firestore. Expecting onSnapshot update.`);
                 
                 // onSnapshot will now fetch the real song and update the playlist.
                 // The temporary song will be implicitly removed as onSnapshot rebuilds the 'playlist' array from Firestore data.
 
             } catch (error) {
-                console.error(`Upload of ${file.name} failed:`, error);
+                console.error(`[Upload] Upload of ${file.name} failed:`, error);
                 // Remove the temporary song from the local playlist if upload fails
                 playlist = playlist.filter(s => s.id !== tempSongId);
                 renderPlaylist(); // Re-render to reflect the removal of the failed upload
-                // Optionally show a user-friendly error message, e.g., in a temporary modal
-                showTemporaryMessage(`Failed to upload ${file.name}. Please try again.`, 'error');
+                showTemporaryMessage(`Failed to upload ${file.name}: ${error.message}`, 'error');
             }
         }
 
